@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Tilemaps;
 
 [RequireComponent(typeof(Rigidbody2D))]
 public class PlayerClickMovement : MonoBehaviour
@@ -9,13 +8,17 @@ public class PlayerClickMovement : MonoBehaviour
     public float moveSpeed = 5f;
     public float waypointReachDistance = 0.15f;
 
-    [Header("Pathfinding")]
-    [Tooltip("Tilemap representing walkable ground tiles")]
-    public Tilemap groundTilemap;
-    [Tooltip("Layer(s) containing obstacle objects (e.g. other units with Collider2D). Must not include this object's layer.")]
+    [Header("Pathfinding Grid")]
+    [Tooltip("World-space bottom-left corner of the walkable area")]
+    public Vector2 gridOrigin = new Vector2(-10f, -5f);
+    [Tooltip("Total width and height of the walkable area in world units")]
+    public Vector2 gridSize = new Vector2(20f, 10f);
+    [Tooltip("Size of each grid cell in world units")]
+    public float cellSize = 0.5f;
+    [Tooltip("Layer(s) containing obstacle objects. Must not include this object's layer.")]
     public LayerMask obstacleLayer;
-    [Tooltip("Radius used for physics obstacle check at each tile center")]
-    public float tileCheckRadius = 0.2f;
+    [Tooltip("Radius used for physics obstacle check at each node center")]
+    public float nodeCheckRadius = 0.2f;
 
     [Tooltip("How often (seconds) to check if the current path is still clear and reroute if blocked")]
     public float rerouteInterval = 0.25f;
@@ -37,7 +40,7 @@ public class PlayerClickMovement : MonoBehaviour
         new Vector3Int(-1,  0, 0), // left
         new Vector3Int( 0,  1, 0), // up
         new Vector3Int( 0, -1, 0), // down
-        new Vector3Int( 1,  1, 0), // diagonal
+        new Vector3Int( 1,  1, 0), // diagonals
         new Vector3Int(-1,  1, 0),
         new Vector3Int( 1, -1, 0),
         new Vector3Int(-1, -1, 0),
@@ -96,17 +99,43 @@ public class PlayerClickMovement : MonoBehaviour
     }
 
     // ---------------------------------------------------------------
+    // Grid helpers (replaces Tilemap API)
+    // ---------------------------------------------------------------
+    private Vector3Int WorldToCell(Vector2 worldPos)
+    {
+        int x = Mathf.FloorToInt((worldPos.x - gridOrigin.x) / cellSize);
+        int y = Mathf.FloorToInt((worldPos.y - gridOrigin.y) / cellSize);
+        return new Vector3Int(x, y, 0);
+    }
+
+    private Vector3 CellCenterWorld(Vector3Int cell)
+    {
+        return new Vector3(
+            gridOrigin.x + (cell.x + 0.5f) * cellSize,
+            gridOrigin.y + (cell.y + 0.5f) * cellSize,
+            0f
+        );
+    }
+
+    private bool InBounds(Vector3Int cell)
+    {
+        int cols = Mathf.FloorToInt(gridSize.x / cellSize);
+        int rows = Mathf.FloorToInt(gridSize.y / cellSize);
+        return cell.x >= 0 && cell.x < cols && cell.y >= 0 && cell.y < rows;
+    }
+
+    // ---------------------------------------------------------------
     // Input
     // ---------------------------------------------------------------
     private void HandleClick()
     {
-        if (groundTilemap == null || Camera.main == null) return;
+        if (Camera.main == null) return;
 
         Vector3 worldPos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         worldPos.z = 0f;
 
-        Vector3Int targetCell = groundTilemap.WorldToCell(worldPos);
-        Vector3Int startCell  = groundTilemap.WorldToCell(transform.position);
+        Vector3Int targetCell = WorldToCell(worldPos);
+        Vector3Int startCell  = WorldToCell(transform.position);
 
         if (startCell == targetCell || !IsWalkable(targetCell)) return;
 
@@ -142,7 +171,7 @@ public class PlayerClickMovement : MonoBehaviour
             if (waypointIndex >= path.Count)
             {
                 rb.linearVelocity = Vector2.zero;
-                rb.MovePosition(target); // snap cleanly to final tile center
+                rb.MovePosition(target); // snap cleanly to final node center
                 isMoving = false;
                 return;
             }
@@ -158,11 +187,11 @@ public class PlayerClickMovement : MonoBehaviour
     // ---------------------------------------------------------------
     private void CheckForReroute()
     {
-        // Scan remaining waypoints for a newly blocked tile
+        // Scan remaining waypoints for a newly blocked node
         bool blocked = false;
         for (int i = waypointIndex; i < path.Count; i++)
         {
-            if (Physics2D.OverlapCircle(path[i], tileCheckRadius, obstacleLayer) != null)
+            if (Physics2D.OverlapCircle(path[i], nodeCheckRadius, obstacleLayer) != null)
             {
                 blocked = true;
                 break;
@@ -171,7 +200,7 @@ public class PlayerClickMovement : MonoBehaviour
 
         if (!blocked) return;
 
-        Vector3Int currentCell = groundTilemap.WorldToCell(transform.position);
+        Vector3Int currentCell = WorldToCell(transform.position);
         List<Vector3> newPath  = AStar(currentCell, goalCell);
 
         if (newPath != null && newPath.Count > 0)
@@ -226,8 +255,8 @@ public class PlayerClickMovement : MonoBehaviour
                     if (!IsWalkable(current.Cell + new Vector3Int(0, dir.y, 0))) continue;
                 }
 
-                float moveCost    = isDiagonal ? DiagonalCost : 1f;
-                float tentativeG  = current.G + moveCost;
+                float moveCost   = isDiagonal ? DiagonalCost : 1f;
+                float tentativeG = current.G + moveCost;
 
                 if (openDict.TryGetValue(neighborCell, out Node existing))
                 {
@@ -275,17 +304,16 @@ public class PlayerClickMovement : MonoBehaviour
 
     private bool IsWalkable(Vector3Int cell)
     {
-        if (!groundTilemap.HasTile(cell)) return false;
-
-        Vector3 worldCenter = groundTilemap.GetCellCenterWorld(cell);
-        return Physics2D.OverlapCircle(worldCenter, tileCheckRadius, obstacleLayer) == null;
+        if (!InBounds(cell)) return false;
+        Vector3 worldCenter = CellCenterWorld(cell);
+        return Physics2D.OverlapCircle(worldCenter, nodeCheckRadius, obstacleLayer) == null;
     }
 
     private List<Vector3> BuildPath(Node endNode)
     {
         var result = new List<Vector3>();
         for (Node n = endNode; n != null; n = n.Parent)
-            result.Add(groundTilemap.GetCellCenterWorld(n.Cell));
+            result.Add(CellCenterWorld(n.Cell));
         result.Reverse();
         return result;
     }
@@ -310,5 +338,13 @@ public class PlayerClickMovement : MonoBehaviour
             Gizmos.color = Color.yellow;
             Gizmos.DrawSphere(path[waypointIndex], 0.1f);
         }
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        // Show the walkable grid boundary when this object is selected
+        Gizmos.color = new Color(0f, 1f, 0f, 0.3f);
+        Vector3 center = new Vector3(gridOrigin.x + gridSize.x * 0.5f, gridOrigin.y + gridSize.y * 0.5f, 0f);
+        Gizmos.DrawWireCube(center, new Vector3(gridSize.x, gridSize.y, 0f));
     }
 }
